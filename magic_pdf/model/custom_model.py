@@ -5,6 +5,10 @@ from magic_pdf.config.constants import *
 from magic_pdf.model.sub_modules.model_init import AtomModelSingleton
 from magic_pdf.model.model_list import AtomicModel
 from magic_pdf.utils.load_image import load_image, encode_image_base64
+from magic_pdf.utils.device_utils import (
+    is_torch_cuda_available, is_torch_npu_available, is_torch_mps_available,
+    auto_device_mem_ratio
+)
 from transformers import LayoutLMv3ForTokenClassification
 from loguru import logger
 import yaml
@@ -34,6 +38,10 @@ class MonkeyOCR:
         if self.device.startswith("cuda"):
             bf16_supported = torch.cuda.is_bf16_supported()
         elif self.device.startswith("mps"):
+            bf16_supported = True
+        elif self.device.startswith("npu"):
+            # TODO: **910B4** 上执行`torch.npu.is_bf16_supported()`后可能就会出现程序异常退出
+            # bf16_supported = torch.npu.is_bf16_supported()
             bf16_supported = True
         
         models_dir = self.configs.get(
@@ -167,7 +175,7 @@ class MonkeyChat_LMDeploy:
         if engine_config is None:
             engine_config = PytorchEngineConfig(session_len=10240)
         dtype = "bfloat16"
-        if torch.cuda.is_available():
+        if is_torch_cuda_available():
             device = torch.cuda.current_device()
             capability = torch.cuda.get_device_capability(device)
             sm_version = capability[0] * 10 + capability[1]  # e.g. sm75 = 7.5
@@ -175,6 +183,11 @@ class MonkeyChat_LMDeploy:
             # use float16 if computing capability <= sm75 (7.5)
             if sm_version <= 75:
                 dtype = "float16"
+        elif is_torch_npu_available():
+            # TODO: **910B4** 上执行`torch.npu.is_bf16_supported()`后可能就会出现程序异常退出
+            # dtype = "bfloat16" if torch.npu.is_bf16_supported() else "float16"
+            dtype = "bfloat16"
+
         engine_config.dtype = dtype
         return engine_config
     
@@ -195,13 +208,8 @@ class MonkeyChat_vLLM:
         self.pipe = LLM(model=model_path,
                         max_seq_len_to_capture=10240,
                         mm_processor_kwargs={'use_fast': True},
-                        gpu_memory_utilization=self._auto_gpu_mem_ratio(0.9))
+                        gpu_memory_utilization=auto_device_mem_ratio(0.9))
         self.gen_config = SamplingParams(max_tokens=4096,temperature=0,repetition_penalty=1.05)
-    
-    def _auto_gpu_mem_ratio(self, ratio):
-        mem_free, mem_total = torch.cuda.mem_get_info()
-        ratio = ratio * mem_free / mem_total
-        return ratio
 
     def batch_inference(self, images, questions):
         placeholder = "<|image_pad|>"
@@ -233,7 +241,14 @@ class MonkeyChat_transformers:
         self.max_new_tokens = max_new_tokens
         
         if device is None:
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            if is_torch_cuda_available():
+                self.device = 'cuda'
+            elif is_torch_mps_available():
+                self.device = 'mps'
+            elif is_torch_npu_available():
+                self.device = 'npu'
+            else:
+                self.device =  'cpu'
         else:
             self.device = device
         
@@ -241,6 +256,10 @@ class MonkeyChat_transformers:
         if self.device.startswith("cuda"):
             bf16_supported = torch.cuda.is_bf16_supported()
         elif self.device.startswith("mps"):
+            bf16_supported = True
+        elif self.device.startswith("npu"):
+            # TODO: **910B4** 上执行`torch.npu.is_bf16_supported()`后可能就会出现程序异常退出
+            # bf16_supported = torch.npu.is_bf16_supported()
             bf16_supported = True
             
         logger.info(f"Loading Qwen2.5VL model from: {model_path}")
@@ -319,8 +338,12 @@ class MonkeyChat_transformers:
                         logger.error(f"Single processing also failed: {single_e}")
                         results.append(f"Error: {str(single_e)}")
             
-            if self.device == 'cuda':
+            if is_torch_cuda_available():
                 torch.cuda.empty_cache()
+            elif is_torch_mps_available():
+                torch.mps.empty_cache()
+            elif is_torch_npu_available():
+                torch.npu.empty_cache()
         
         return results
     
@@ -506,8 +529,10 @@ class MonkeyChat_LMDeploy_queue:
         self.max_queue_size = max_queue_size
         
         # Clear GPU memory before initialization
-        if torch.cuda.is_available():
+        if is_torch_cuda_available():
             torch.cuda.empty_cache()
+        elif is_torch_npu_available():
+            torch.npu.empty_cache()
         
         # Initialize LMDeploy pipeline (for efficient batch processing)
         self.engine_config = self._auto_config_dtype(engine_config, PytorchEngineConfig)
@@ -543,7 +568,7 @@ class MonkeyChat_LMDeploy_queue:
         if engine_config is None:
             engine_config = PytorchEngineConfig(session_len=10240)
         dtype = "bfloat16"
-        if torch.cuda.is_available():
+        if is_torch_cuda_available():
             device = torch.cuda.current_device()
             capability = torch.cuda.get_device_capability(device)
             sm_version = capability[0] * 10 + capability[1]  # e.g. sm75 = 7.5
@@ -551,6 +576,10 @@ class MonkeyChat_LMDeploy_queue:
             # use float16 if computing capability <= sm75 (7.5)
             if sm_version <= 75:
                 dtype = "float16"
+        elif is_torch_npu_available():
+            # TODO: **910B4** 上执行`torch.npu.is_bf16_supported()`后可能就会出现程序异常退出
+            # dtype = "bfloat16" if torch.npu.is_bf16_supported() else "float16"
+            dtype = "bfloat16"
         engine_config.dtype = dtype
         return engine_config
     
@@ -833,9 +862,12 @@ class MonkeyChat_LMDeploy_queue:
         try:
             if hasattr(self, 'pipe') and self.pipe is not None:
                 del self.pipe
-            if torch.cuda.is_available():
+            if is_torch_cuda_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+            elif is_torch_npu_available():
+                torch.npu.empty_cache()
+                torch.npu.synchronize()
         except Exception as e:
             logger.warning(f"Error during cleanup: {e}")
         
@@ -880,7 +912,7 @@ class MonkeyChat_vLLM_queue:
             model=model_path,
             max_seq_len_to_capture=10240,
             mm_processor_kwargs={'use_fast': True},
-            gpu_memory_utilization=self._auto_gpu_mem_ratio(0.9),
+            gpu_memory_utilization=auto_device_mem_ratio(0.9),
             max_num_seqs=max_batch_size * 2,  # Allow larger sequence numbers
         )
         
@@ -903,11 +935,6 @@ class MonkeyChat_vLLM_queue:
         
         logger.info(f"vLLM MultiUser engine initialized for model: {self.model_name}")
         logger.info(f"Max batch size: {max_batch_size}, Queue timeout: {queue_timeout}s")
-    
-    def _auto_gpu_mem_ratio(self, ratio):
-        mem_free, mem_total = torch.cuda.mem_get_info()
-        ratio = ratio * mem_free / mem_total
-        return ratio
     
     def _background_processor(self):
         """Background thread: continuously process request queue"""
