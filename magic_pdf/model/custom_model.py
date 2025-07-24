@@ -187,6 +187,7 @@ class MonkeyChat_LMDeploy:
             # TODO: **910B4** 上执行`torch.npu.is_bf16_supported()`后可能就会出现程序异常退出
             # dtype = "bfloat16" if torch.npu.is_bf16_supported() else "float16"
             dtype = "bfloat16"
+            engine_config.device_type = "npu"
 
         engine_config.dtype = dtype
         return engine_config
